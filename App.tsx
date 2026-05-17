@@ -59,7 +59,7 @@ const App: React.FC = () => {
             </h1>
             <p className="text-lg text-slate-400 max-w-2xl mx-auto">
                 {mode === AppMode.LIVE_CONVERSATION 
-                    ? "Experimente a API Gemini 2.5 Live. Fale naturalmente, interrompa a qualquer momento e obtenha respostas de áudio instantâneas com baixa latência."
+                    ? "Experimente a API Gemini 3.1 Live. Fale naturalmente, interrompa a qualquer momento e obtenha respostas de áudio instantâneas com baixa latência."
                     : "Gere áudio realista de alta qualidade a partir de texto usando os modelos TTS avançados do Gemini. Perfeito para tradução e acessibilidade."}
             </p>
         </div>
@@ -71,7 +71,7 @@ const App: React.FC = () => {
 
       <footer className="border-t border-slate-800 mt-12 py-8">
           <div className="text-center text-slate-500 text-sm">
-              Desenvolvido com Gemini 2.5 Flash • Live API • Web Audio API
+              Desenvolvido com Gemini 3.1 Flash • Live API • Web Audio API
           </div>
       </footer>
     </div>

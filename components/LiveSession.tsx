@@ -1,5 +1,4 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
-import { GoogleGenAI, LiveServerMessage, Modality } from '@google/genai';
 import { Mic, MicOff, Activity, Volume2, AlertCircle, Wifi, WifiOff, Loader2, RefreshCw, Download } from 'lucide-react';
 import { 
   encodeBase64, 
@@ -12,7 +11,6 @@ import {
 } from '../services/audioUtils';
 import Visualizer from './Visualizer';
 
-const MODEL_NAME = 'gemini-2.5-flash-native-audio-preview-09-2025';
 const BUFFER_SIZE = 4096;
 
 const LiveSession: React.FC = () => {
@@ -27,7 +25,7 @@ const LiveSession: React.FC = () => {
   const inputContextRef = useRef<AudioContext | null>(null);
   const nextStartTimeRef = useRef<number>(0);
   const sourcesRef = useRef<Set<AudioBufferSourceNode>>(new Set());
-  const sessionRef = useRef<any>(null);
+  const wsRef = useRef<WebSocket | null>(null);
   const inputAnalyserRef = useRef<AnalyserNode | null>(null);
   const outputAnalyserRef = useRef<AnalyserNode | null>(null);
   
@@ -50,10 +48,10 @@ const LiveSession: React.FC = () => {
 
   const disconnect = useCallback(() => {
     isManualDisconnect.current = true;
-    if (sessionRef.current) {
-       try {
-           sessionRef.current.close(); 
-       } catch (e) { console.warn('Error closing session', e)}
+    if (wsRef.current) {
+        try {
+            wsRef.current.close(); 
+        } catch (e) { console.warn('Error closing websocket', e)}
     }
     
     sourcesRef.current.forEach(source => {
@@ -66,7 +64,7 @@ const LiveSession: React.FC = () => {
     
     audioContextRef.current = null;
     inputContextRef.current = null;
-    sessionRef.current = null;
+    wsRef.current = null;
     pcmBufferRef.current = null; // Reset buffer
     
     setIsConnected(false);
@@ -85,10 +83,6 @@ const LiveSession: React.FC = () => {
     setTranscription('');
 
     try {
-      if (!process.env.API_KEY) {
-        throw new Error("API Key não encontrada no ambiente.");
-      }
-
       // Initialize Audio Contexts
       const inputCtx = getAudioContext(INPUT_SAMPLE_RATE);
       const outputCtx = getAudioContext(OUTPUT_SAMPLE_RATE);
@@ -120,127 +114,142 @@ const LiveSession: React.FC = () => {
       // Optimization: Define processor logic outside callback to avoid closure re-creation
       scriptProcessor.onaudioprocess = (e) => {
         // Strict mute check to avoid ANY processing
-        if (isMuted || !sessionRef.current) return;
+        if (isMuted || !wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;
         
         const inputData = e.inputBuffer.getChannelData(0);
         const pcmBuffer = pcmBufferRef.current;
 
         if (pcmBuffer) {
-            // Use optimized conversion to existing buffer
             floatTo16BitPCM(inputData, pcmBuffer);
-            
-            // Use optimized base64 encoding
             const base64Data = encodeBase64(new Uint8Array(pcmBuffer.buffer));
             
-            // Send directly to the active session
-            sessionRef.current.sendRealtimeInput({ 
-                media: {
-                    mimeType: 'audio/pcm;rate=16000',
-                    data: base64Data
+            // Forward to server proxy
+            wsRef.current.send(JSON.stringify({ 
+                realtimeInput: {
+                    audio: {
+                        mimeType: 'audio/pcm;rate=16000',
+                        data: base64Data
+                    }
                 }
-            });
+            }));
         }
       };
 
-      const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+      // Connect to Backend WebSocket Proxy
+      const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+      const ws = new WebSocket(`${protocol}//${window.location.host}/ws-live`);
+      wsRef.current = ws;
 
-      // Start Connection
-      const sessionPromise = ai.live.connect({
-        model: MODEL_NAME,
-        callbacks: {
-          onopen: () => {
-            console.log('Gemini Live Session Opened');
-            setIsConnected(true);
-            setIsConnecting(false);
-          },
-          onmessage: async (message: LiveServerMessage) => {
-            // Handle Text Transcription
-            if (message.serverContent?.modelTurn?.parts?.[0]?.text) {
-                setTranscription(prev => prev + message.serverContent?.modelTurn?.parts?.[0]?.text);
-            }
+      ws.onopen = () => {
+          console.log('Connected to Backend Proxy');
+      };
 
-            // Handle Audio Output
-            const base64Audio = message.serverContent?.modelTurn?.parts?.[0]?.inlineData?.data;
-            if (base64Audio && outputCtx) {
-              const audioBuffer = await decodeAudioData(
-                decodeBase64(base64Audio),
-                outputCtx,
-                OUTPUT_SAMPLE_RATE
-              );
+      ws.onmessage = async (event) => {
+          try {
+              const message = JSON.parse(event.data);
               
-              const bufferSource = outputCtx.createBufferSource();
-              bufferSource.buffer = audioBuffer;
-              
-              // Connect to analyser for visualization then to destination
-              bufferSource.connect(outAnalyser);
-              outAnalyser.connect(outputCtx.destination);
-              
-              // Queueing logic
-              const currentTime = outputCtx.currentTime;
-              if (nextStartTimeRef.current < currentTime) {
-                  nextStartTimeRef.current = currentTime;
+              if (message.status === 'open') {
+                  setIsConnected(true);
+                  setIsConnecting(false);
               }
-              
-              bufferSource.start(nextStartTimeRef.current);
-              nextStartTimeRef.current += audioBuffer.duration;
-              
-              sourcesRef.current.add(bufferSource);
-              bufferSource.onended = () => sourcesRef.current.delete(bufferSource);
-            }
 
-            // Handle Interruption
-            if (message.serverContent?.interrupted) {
-              console.log('Model interrupted');
-              sourcesRef.current.forEach(s => {
-                  try { s.stop(); } catch(e) {}
-              });
-              sourcesRef.current.clear();
-              nextStartTimeRef.current = 0;
-              // Optional: Add a marker in transcription for interruption
-              setTranscription(prev => prev + "\n[Interrompido]\n");
-            }
-          },
-          onclose: () => {
-            console.log('Session closed');
-            setIsConnected(false);
-            setIsConnecting(false);
-            if (!isManualDisconnect.current) {
-                setError("Conexão perdida inesperadamente. Tente reconectar.");
-            }
-            // Clean up resources
-            if (audioContextRef.current && audioContextRef.current.state !== 'closed') {
-                audioContextRef.current.close();
-            }
-            if (inputContextRef.current && inputContextRef.current.state !== 'closed') {
-                inputContextRef.current.close();
-            }
-          },
-          onerror: (err) => {
-            console.error('Session error', err);
-            setIsConnected(false);
-            setIsConnecting(false);
-            setError("Ocorreu um erro de conexão.");
+              if (message.error) {
+                  let errorMessage = message.error;
+                  if (typeof errorMessage === 'string' && (errorMessage.includes("429") || errorMessage.includes("RESOURCE_EXHAUSTED"))) {
+                      // Attempt to extract detail from JSON if message looks like one
+                      try {
+                          if (errorMessage.includes('{')) {
+                              const jsonPart = JSON.parse(errorMessage.substring(errorMessage.indexOf('{')));
+                              const retryDelay = jsonPart?.error?.details?.find((d: any) => d['@type']?.includes('RetryInfo'))?.retryDelay;
+                              errorMessage = "Cota de uso Live excedida." + (retryDelay ? ` Aguarde ${retryDelay}.` : " Tente novamente em breve.");
+                          } else {
+                              errorMessage = "Cota Live excedida. Por favor, aguarde um momento.";
+                          }
+                      } catch (e) {
+                          errorMessage = "Limite de uso da API Gemini atingido. Aguarde alguns segundos.";
+                      }
+                  }
+                  setError(errorMessage);
+                  disconnect();
+              }
+
+              // Process parts
+              const parts = message.serverContent?.modelTurn?.parts;
+              
+              // Handle Text Transcription
+              const textPart = parts?.find((p: any) => p.text);
+              if (textPart?.text) {
+                  setTranscription(prev => prev + textPart.text);
+              }
+
+              // Handle Audio Data
+              const audioPart = parts?.find((p: any) => p.inlineData?.data);
+              
+              if (audioPart?.inlineData?.data) {
+                  const base64Audio = audioPart.inlineData.data;
+                  if (outputCtx) {
+                      const audioBuffer = await decodeAudioData(
+                          decodeBase64(base64Audio),
+                          outputCtx,
+                          OUTPUT_SAMPLE_RATE
+                      );
+                      
+                      const bufferSource = outputCtx.createBufferSource();
+                      bufferSource.buffer = audioBuffer;
+                      
+                      bufferSource.connect(outAnalyser);
+                      outAnalyser.connect(outputCtx.destination);
+                      
+                      const currentTime = outputCtx.currentTime;
+                      if (nextStartTimeRef.current < currentTime) {
+                          nextStartTimeRef.current = currentTime;
+                      }
+                      
+                      bufferSource.start(nextStartTimeRef.current);
+                      nextStartTimeRef.current += audioBuffer.duration;
+                      
+                      sourcesRef.current.add(bufferSource);
+                      bufferSource.onended = () => sourcesRef.current.delete(bufferSource);
+                  }
+              }
+
+              // Handle Interruption
+              if (message.serverContent?.interrupted) {
+                  console.log('Model interrupted');
+                  sourcesRef.current.forEach(s => {
+                      try { s.stop(); } catch(e) {}
+                  });
+                  sourcesRef.current.clear();
+                  nextStartTimeRef.current = 0;
+                  setTranscription(prev => prev + "\n[Interrompido]\n");
+              }
+          } catch (e) {
+              console.error("Failed to parse or process WebSocket message:", e);
           }
-        },
-        config: {
-          responseModalities: [Modality.AUDIO],
-          speechConfig: {
-            voiceConfig: { prebuiltVoiceConfig: { voiceName: 'Zephyr' } }
-          },
-          systemInstruction: "Você é um assistente de tradução útil, espirituoso e poliglota. Você pode traduzir frases, discutir idiomas ou apenas conversar casualmente. Mantenha as respostas concisas. Fale principalmente em Português do Brasil.",
-        }
-      });
+      };
 
-      // Store session in ref immediately when resolved so onAudioProcess can use it
-      sessionRef.current = await sessionPromise;
+      ws.onclose = () => {
+          console.log('Proxy connection closed');
+          setIsConnected(false);
+          setIsConnecting(false);
+          if (!isManualDisconnect.current) {
+              setError("Conexão com o servidor perdida.");
+          }
+          if (audioContextRef.current) audioContextRef.current.close();
+          if (inputContextRef.current) inputContextRef.current.close();
+      };
+
+      ws.onerror = (err) => {
+          console.error('WS Error', err);
+          setError("Erro na conexão WebSocket.");
+          disconnect();
+      };
 
     } catch (err: any) {
       console.error(err);
       setError(err.message || "Falha ao conectar");
       setIsConnected(false);
       setIsConnecting(false);
-      
-      // Cleanup on fail
       if (inputContextRef.current) inputContextRef.current.close();
       if (audioContextRef.current) audioContextRef.current.close();
     }
@@ -304,7 +313,7 @@ const LiveSession: React.FC = () => {
              </div>
              <div>
                 <h2 className="text-xl font-bold text-white">Conversa ao Vivo</h2>
-                <p className="text-xs text-slate-400 font-medium">Gemini 2.5 Flash Native Audio</p>
+                <p className="text-xs text-slate-400 font-medium">Gemini 3.1 Flash Native Audio</p>
              </div>
           </div>
           

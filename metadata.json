@@ -3,5 +3,8 @@
   "description": "Uma aplicação de modo duplo com IA conversacional em tempo real usando a API Gemini Live e tradução de Texto para Fala de alta qualidade.",
   "requestFramePermissions": [
     "microphone"
+  ],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
   ]
 }

@@ -4,14 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Gemini Voice Bridge</title>
-    <script src="https://cdn.tailwindcss.com"></script>
     <style>
-      @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
-      body {
-        font-family: 'Inter', sans-serif;
-        background-color: #0f172a;
-        color: #f8fafc;
-      }
       /* Custom scrollbar for logs */
       .scrollbar-hide::-webkit-scrollbar {
           display: none;
@@ -21,19 +14,55 @@
           scrollbar-width: none;
       }
     </style>
-  <script type="importmap">
-{
-  "imports": {
-    "react/": "https://aistudiocdn.com/react@^19.2.0/",
-    "react": "https://aistudiocdn.com/react@^19.2.0",
-    "lucide-react": "https://aistudiocdn.com/lucide-react@^0.554.0",
-    "@google/genai": "https://aistudiocdn.com/@google/genai@^1.30.0",
-    "react-dom/": "https://aistudiocdn.com/react-dom@^19.2.0/"
-  }
-}
-</script>
+    <script>
+      /**
+       * Defensive fix for "Cannot set property ethereum of #<Window> which has only a getter"
+       * This error occurs when external scripts or environments try to iterate over window 
+       * and conflict with read-only properties injected by Web3 extensions.
+       */
+      (function() {
+        function isEthereumError(msg) {
+          msg = String(msg || "");
+          return msg.toLowerCase().includes('ethereum') && 
+                 (msg.toLowerCase().includes('getter') || 
+                  msg.toLowerCase().includes('read only') ||
+                  msg.toLowerCase().includes('setting property'));
+        }
+
+        // Catch errors during capture phase
+        window.addEventListener('error', function(e) {
+          if (isEthereumError(e.message) || isEthereumError(e.error)) {
+            e.preventDefault();
+            e.stopImmediatePropagation();
+          }
+        }, true);
+
+        // Also override window.onerror as a secondary defense
+        var oldOnError = window.onerror;
+        window.onerror = function(msg) {
+          if (isEthereumError(msg)) return true;
+          if (oldOnError) return oldOnError.apply(this, arguments);
+          return false;
+        };
+
+        // Try to define a no-op setter if it's configurable but lacks one
+        try {
+          var desc = Object.getOwnPropertyDescriptor(window, 'ethereum');
+          if (desc && desc.get && !desc.set && desc.configurable) {
+            Object.defineProperty(window, 'ethereum', {
+              get: desc.get,
+              set: function() { /* suppress */ },
+              configurable: true,
+              enumerable: true
+            });
+          }
+        } catch (e) {}
+      })();
+    </script>
+    <link rel="stylesheet" href="/index.css">
 </head>
   <body>
     <div id="root"></div>
-  </body>
+  <script type="module" src="/index.tsx"></script>
+</body>
 </html>

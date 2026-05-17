@@ -1,7 +1,6 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { GoogleGenAI, Modality } from '@google/genai';
-import { Play, Languages, Loader2, Download, Mic, Zap, Settings2, Info, AlertCircle, Timer, Gauge, AudioLines } from 'lucide-react';
-import { decodeAudioData, decodeBase64, getAudioContext } from '../services/audioUtils';
+import { Play, Languages, Loader2, Download, Mic, Zap, Settings2, Info, AlertCircle, Timer, Gauge, AudioLines, Globe } from 'lucide-react';
+import { decodeAudioData, decodeBase64, getAudioContext, audioBufferToWav } from '../services/audioUtils';
 
 // Lista oficial de vozes suportadas e testadas
 const VOICES = [
@@ -10,11 +9,6 @@ const VOICES = [
   { id: 'fenrir', label: 'Fenrir (Masculino)' },
   { id: 'kore', label: 'Kore (Feminino)' },
   { id: 'zephyr', label: 'Zephyr (Feminino)' },
-  { id: 'aoede', label: 'Aoede (Feminino)' },
-  { id: 'orion', label: 'Orion (Masculino)' },
-  { id: 'pegasus', label: 'Pegasus (Masculino)' },
-  { id: 'dipper', label: 'Dipper (Masculino)' },
-  { id: 'perseus', label: 'Perseus (Masculino)' },
 ];
 
 const TONE_STYLES = [
@@ -23,7 +17,20 @@ const TONE_STYLES = [
   { id: 'professional', label: 'Profissional / Noticiário', instruction: 'in a professional, formal, news-anchor style' },
   { id: 'calm', label: 'Calmo / Sereno', instruction: 'in a calm, soothing, and soft tone' },
   { id: 'dramatic', label: 'Dramático / Narrativa', instruction: 'in a dramatic, storytelling tone with strong emotional emphasis' },
+  { id: 'whispered', label: 'Sussurrado / Íntimo', instruction: 'in a very quiet, whispered, and intimate tone' },
+  { id: 'authoritative', label: 'Autoritário / Firme', instruction: 'in an authoritative, firm, and commanding tone' },
   { id: 'didactic', label: 'Didático / Explicativo', instruction: 'in a slow, clear, and didactic tone, emphasizing key words' },
+];
+
+const ACCENT_STYLES = [
+  { id: 'standard', label: 'Neutro / Padrão', instruction: '' },
+  { id: 'br', label: 'Brasileiro (Sudeste)', instruction: 'with a clear Brazilian accent from the southeast' },
+  { id: 'br_nordeste', label: 'Brasileiro (Nordeste)', instruction: 'with a beautiful and melodic Northeastern Brazilian accent' },
+  { id: 'pt', label: 'Português (Portugal)', instruction: 'with a clear European Portuguese accent' },
+  { id: 'us', label: 'Americano (EUA)', instruction: 'with a clear American accent' },
+  { id: 'uk', label: 'Britânico (UK)', instruction: 'with a refined British accent' },
+  { id: 'es_mx', label: 'Espanhol (México)', instruction: 'with a native Mexican Spanish accent' },
+  { id: 'fr_fr', label: 'Francês (França)', instruction: 'with a native French accent' },
 ];
 
 const TextToSpeech: React.FC = () => {
@@ -33,6 +40,7 @@ const TextToSpeech: React.FC = () => {
   const [sampleRate, setSampleRate] = useState(24000);
   const [speed, setSpeed] = useState<'slow' | 'normal' | 'fast'>('normal');
   const [tone, setTone] = useState('standard');
+  const [accent, setAccent] = useState('standard');
   const [loading, setLoading] = useState(false);
   const [audioUrl, setAudioUrl] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -48,10 +56,6 @@ const TextToSpeech: React.FC = () => {
     setError(null);
     
     try {
-      if (!process.env.API_KEY) throw new Error("Chave da API ausente. Verifique suas configurações.");
-
-      const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
-      
       let prompt;
       const pauseInstruction = ' Interpret <break time="Xs" /> tags as silent pauses of X seconds. Do not read the tags aloud.';
       
@@ -64,30 +68,35 @@ const TextToSpeech: React.FC = () => {
       const selectedTone = TONE_STYLES.find(t => t.id === tone) || TONE_STYLES[0];
       const toneInstruction = selectedTone.instruction;
 
-      // Intonation/Fluency instruction - APRIMORADO PARA REMOVER TROPEÇOS
-      const fluencyInstruction = "Ensure the speech is completely fluid, seamless, and continuous. Avoid awkward stumbling, robotic pauses at commas, or hesitation. Connect phrases naturally like a professional voice actor with perfect breath control.";
+      // Accent Instruction
+      const selectedAccent = ACCENT_STYLES.find(a => a.id === accent) || ACCENT_STYLES[0];
+      const accentInstruction = selectedAccent.instruction ? ` ${selectedAccent.instruction},` : '';
+
+      // Intonation/Fluency instruction - APRIMORADO PARA MÁXIMA NATURALIDADE
+      const fluencyInstruction = "Deliver the speech with exceptional naturalness, focusing on realistic prosody and melodic sentence contours. Avoid mechanical cadences or predictable rhythms. Eliminate robotic pauses at punctuation; instead, use fluid transitions that mimic human breath control. Maintain a dynamic and expressive flow, sounding like a professional voice artist in a high-quality studio recording.";
 
       if (targetLang === 'auto') {
-        prompt = `Read the following text aloud ${speedInstruction} and ${toneInstruction} in its original language. ${fluencyInstruction}${pauseInstruction} Text: "${text}"`;
+        prompt = `Read the following text aloud ${speedInstruction} and ${toneInstruction},${accentInstruction} in its original language. ${fluencyInstruction}${pauseInstruction} Text: "${text}"`;
       } else {
-        prompt = `Translate the following text to ${targetLang} and read it aloud ${speedInstruction} and ${toneInstruction}. ${fluencyInstruction}${pauseInstruction} Text: "${text}"`;
+        prompt = `Translate the following text to ${targetLang} and read it aloud ${speedInstruction} and ${toneInstruction},${accentInstruction}. ${fluencyInstruction}${pauseInstruction} Text: "${text}"`;
       }
 
-      const response = await ai.models.generateContent({
-        model: "gemini-2.5-flash-preview-tts",
-        contents: prompt,
-        config: {
-          responseModalities: [Modality.AUDIO],
-          speechConfig: {
-            voiceConfig: {
-              prebuiltVoiceConfig: { voiceName: voice },
-            },
-          },
-        },
+      const response = await fetch("/api/tts", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          prompt,
+          voice,
+          sampleRate
+        })
       });
 
-      const candidate = response.candidates?.[0];
-      const base64Audio = candidate?.content?.parts?.[0]?.inlineData?.data;
+      if (!response.ok) {
+        const errData = await response.json();
+        throw new Error(errData.error || "Failed to generate audio");
+      }
+
+      const { audio: base64Audio } = await response.json();
       
       if (base64Audio) {
         // Create context with user-selected sample rate (Quality)
@@ -107,30 +116,60 @@ const TextToSpeech: React.FC = () => {
         setAudioUrl(url);
         audioCtx.close();
       } else {
-          // Check if the model returned text instead (e.g. refusal or error message)
-          const textPart = candidate?.content?.parts?.[0]?.text;
-          if (textPart) {
-             throw new Error(`O modelo retornou texto em vez de áudio: "${textPart}"`);
-          }
-          
-          // Check if there is a finish reason other than STOP
-          const finishReason = candidate?.finishReason;
-          if (finishReason) {
-              throw new Error(`Geração finalizada com motivo: ${finishReason}`);
-          }
-
           throw new Error("A resposta da API não contém dados de áudio válidos.");
       }
 
     } catch (e: any) {
       console.error("TTS Error:", e);
-      // Capture detailed error message from API if available
-      const errorMessage = e.message || e.toString() || "Ocorreu um erro desconhecido durante a geração.";
-      setError(errorMessage);
+      let errorMessage = "Ocorreu um erro inesperado durante a geração do áudio.";
+      let errorCode = "";
+      let retryRecommendation = "";
+
+      try {
+        // Tenta extrair o JSON de erro se a mensagem contiver um
+        const errorString = e.message || String(e);
+        const jsonMatch = errorString.match(/\{.*\}/s);
+        const apiError = jsonMatch ? JSON.parse(jsonMatch[0])?.error : null;
+
+        if (apiError) {
+          errorCode = apiError.code ? `[Erro ${apiError.code}] ` : "";
+          const status = apiError.status || "";
+          
+          if (apiError.code === 429 || status === "RESOURCE_EXHAUSTED") {
+            errorMessage = "Cota de uso excedida. Você atingiu o limite de requisições permitidas para o modelo Gemini Flash TTS na conta gratuita.";
+            
+            // Tenta obter o tempo de espera recomendado
+            const retryInfo = apiError.details?.find((d: any) => d['@type']?.includes('RetryInfo'));
+            if (retryInfo?.retryDelay) {
+              retryRecommendation = ` Por favor, aguarde aproximadamente ${retryInfo.retryDelay} antes de tentar uma nova geração.`;
+            } else {
+              retryRecommendation = " Aguarde alguns segundos ou tente um texto menor.";
+            }
+          } else if (apiError.code === 400 || status === "INVALID_ARGUMENT") {
+            errorMessage = "Requisição inválida. O texto pode ser muito longo ou conter caracteres não suportados pelo sintetizador.";
+          } else if (apiError.code === 500) {
+            errorMessage = "Erro interno no servidor do Google Gemini. Tente novamente em instantes.";
+          } else {
+            errorMessage = apiError.message || errorMessage;
+          }
+        } else {
+          // Fallback para strings simples
+          const rawMsg = String(e);
+          if (rawMsg.includes("429") || rawMsg.includes("quota")) {
+            errorMessage = "Cota de uso excedida. Por favor, aguarde um momento antes de tentar novamente.";
+          } else {
+            errorMessage = e.message || rawMsg;
+          }
+        }
+      } catch (parseErr) {
+        errorMessage = e.message || String(e);
+      }
+
+      setError(`${errorCode}${errorMessage}${retryRecommendation}`);
     } finally {
       setLoading(false);
     }
-  }, [text, targetLang, voice, sampleRate, speed, tone]);
+  }, [text, targetLang, voice, sampleRate, speed, tone, accent]);
 
   // Effect for Auto-Generate with Debounce
   useEffect(() => {
@@ -277,9 +316,28 @@ const TextToSpeech: React.FC = () => {
                             </button>
                         ))}
                     </div>
-                    <p className="text-[10px] text-slate-500 mt-1.5">
-                        Controla a expressividade e garante que o modelo respeite acentuações e pontuações gramaticais.
-                    </p>
+                </div>
+
+                {/* Accent Selector */}
+                <div>
+                    <label className="block text-xs font-medium text-slate-400 mb-2 uppercase tracking-wider flex items-center gap-2">
+                        <Globe className="w-3 h-3" /> Sotaque / Regionalismo
+                    </label>
+                    <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+                        {ACCENT_STYLES.map((a) => (
+                            <button
+                                key={a.id}
+                                onClick={() => setAccent(a.id)}
+                                className={`px-3 py-2 rounded-lg text-xs font-medium transition-all text-left border ${
+                                    accent === a.id 
+                                    ? 'bg-pink-500/20 text-pink-300 border-pink-500/40 shadow-sm' 
+                                    : 'bg-slate-800 border-slate-700 text-slate-400 hover:bg-slate-700 hover:text-slate-200'
+                                }`}
+                            >
+                                {a.label}
+                            </button>
+                        ))}
+                    </div>
                 </div>
 
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-6 pt-4 border-t border-slate-700/50">
@@ -452,7 +510,7 @@ const TextToSpeech: React.FC = () => {
                          <a 
                             href={audioUrl} 
                             download={`gemini_tts_${new Date().toISOString().slice(0,19).replace(/[-:T]/g, '')}.wav`}
-                            className="flex items-center gap-2 px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white text-sm font-bold rounded-lg transition-all shadow-lg shadow-indigo-900/20 hover:translate-y-[-1px]"
+                            className="flex items-center gap-2 px-4 py-2 bg-emerald-600 hover:bg-emerald-500 text-white text-sm font-bold rounded-lg transition-all shadow-lg shadow-emerald-900/20 hover:translate-y-[-1px]"
                         >
                             <Download className="w-4 h-4" />
                             Exportar como WAV
@@ -465,60 +523,5 @@ const TextToSpeech: React.FC = () => {
     </div>
   );
 };
-
-// Helper function to convert AudioBuffer to WAV Blob
-function audioBufferToWav(buffer: AudioBuffer): Blob {
-  const numOfChan = buffer.numberOfChannels;
-  const length = buffer.length * numOfChan * 2 + 44;
-  const bufferArr = new ArrayBuffer(length);
-  const view = new DataView(bufferArr);
-  const channels = [];
-  let i;
-  let sample;
-  let offset = 0;
-  let pos = 0;
-
-  // write WAVE header
-  setUint32(0x46464952);                         // "RIFF"
-  setUint32(length - 8);                         // file length - 8
-  setUint32(0x45564157);                         // "WAVE"
-
-  setUint32(0x20746d66);                         // "fmt " chunk
-  setUint32(16);                                 // length = 16
-  setUint16(1);                                  // PCM (uncompressed)
-  setUint16(numOfChan);
-  setUint32(buffer.sampleRate);
-  setUint32(buffer.sampleRate * 2 * numOfChan);  // avg. bytes/sec
-  setUint16(numOfChan * 2);                      // block-align
-  setUint16(16);                                 // 16-bit (hardcoded in this example)
-
-  setUint32(0x61746164);                         // "data" - chunk
-  setUint32(length - pos - 4);                   // chunk length
-
-  for(i = 0; i < buffer.numberOfChannels; i++)
-    channels.push(buffer.getChannelData(i));
-
-  while(pos < buffer.length) {
-    for(i = 0; i < numOfChan; i++) {             // interleave channels
-      sample = Math.max(-1, Math.min(1, channels[i][pos])); // clamp
-      sample = (0.5 + sample < 0 ? sample * 32768 : sample * 32767)|0; // scale to 16-bit signed int
-      view.setInt16(44 + offset, sample, true);  // write 16-bit sample
-      offset += 2;
-    }
-    pos++;
-  }
-
-  return new Blob([bufferArr], { type: 'audio/wav' });
-
-  function setUint16(data: number) {
-    view.setUint16(pos, data, true);
-    pos += 2;
-  }
-
-  function setUint32(data: number) {
-    view.setUint32(pos, data, true);
-    pos += 4;
-  }
-}
 
 export default TextToSpeech;

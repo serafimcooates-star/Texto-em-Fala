@@ -1,4 +1,8 @@
-import { Blob } from '@google/genai';
+// GenAIBlob interface to match @google/genai structure without importing the whole SDK on the client
+export interface GenAIBlob {
+  data: string;
+  mimeType: string;
+}
 
 // Audio context configuration
 export const INPUT_SAMPLE_RATE = 16000;
@@ -70,7 +74,7 @@ export function floatTo16BitPCM(input: Float32Array, output: Int16Array): void {
  * Legacy wrapper for backward compatibility if needed, 
  * but prefer using floatTo16BitPCM with reusable buffers.
  */
-export function createPcmBlob(data: Float32Array): Blob {
+export function createPcmBlob(data: Float32Array): GenAIBlob {
   const l = data.length;
   const int16 = new Int16Array(l);
   floatTo16BitPCM(data, int16);
@@ -78,6 +82,63 @@ export function createPcmBlob(data: Float32Array): Blob {
     data: encodeBase64(new Uint8Array(int16.buffer)),
     mimeType: 'audio/pcm;rate=16000',
   };
+}
+
+/**
+ * Converts an AudioBuffer to a WAV Blob
+ */
+export function audioBufferToWav(buffer: AudioBuffer): Blob {
+  const numOfChan = buffer.numberOfChannels;
+  const length = buffer.length * numOfChan * 2 + 44;
+  const outBuffer = new ArrayBuffer(length);
+  const view = new DataView(outBuffer);
+  const channels = [];
+  let offset = 0;
+  let pos = 0;
+
+  function setUint16(data: number) {
+    view.setUint16(pos, data, true);
+    pos += 2;
+  }
+
+  function setUint32(data: number) {
+    view.setUint32(pos, data, true);
+    pos += 4;
+  }
+
+  // write WAVE header
+  setUint32(0x46464952); // "RIFF"
+  setUint32(length - 8); // file length - 8
+  setUint32(0x45564157); // "WAVE"
+
+  setUint32(0x20746d66); // "fmt " chunk
+  setUint32(16); // length = 16
+  setUint16(1); // PCM (uncompressed)
+  setUint16(numOfChan);
+  setUint32(buffer.sampleRate);
+  setUint32(buffer.sampleRate * 2 * numOfChan); // avg. bytes/sec
+  setUint16(numOfChan * 2); // block-align
+  setUint16(16); // 16-bit
+
+  setUint32(0x61746164); // "data" - chunk
+  setUint32(length - pos - 4); // chunk length
+
+  // write interleaved data
+  for (let i = 0; i < numOfChan; i++) {
+    channels.push(buffer.getChannelData(i));
+  }
+
+  while (pos < length) {
+    for (let i = 0; i < numOfChan; i++) {
+      let sample = Math.max(-1, Math.min(1, channels[i][offset]));
+      sample = sample < 0 ? sample * 0x8000 : sample * 0x7FFF;
+      view.setInt16(pos, sample, true);
+      pos += 2;
+    }
+    offset++;
+  }
+
+  return new Blob([outBuffer], { type: 'audio/wav' });
 }
 
 export const getAudioContext = (sampleRate: number): AudioContext => {
